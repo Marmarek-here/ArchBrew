@@ -38,5 +38,11 @@ Because **ArchBrew** relies on Arch’s package infrastructure, it is not intend
 - Official Arch repositories
 This allows you to install software from either source using a unified brew workflow.
 
+# Installation (only on **Arch**)
+Install it using paru -S archbrew or yay -S archbrew depending on your AUR helper.     
+
+# Building ArchBrew
+Using git: git clone https://github.com/Marmarek-here/ArchBrew.git && cd ArchBrew && makepkg -si
+
 # Changelog
 31.05.2026 - FIRST STABLE RELEASE (it was made at night enthusiasm)
