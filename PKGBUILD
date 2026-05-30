@@ -4,6 +4,7 @@ pkgver=1.0.0
 pkgrel=1
 pkgdesc="Homebrew-like standalone CLI package manager for Arch"
 arch=('x86_64')
+url="https://github.com/Marmarek-here/ArchBrew"
 license=('MIT')
 depends=('glibc' 'pacman')
 makedepends=('cargo')
