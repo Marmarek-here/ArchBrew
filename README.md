@@ -3,7 +3,7 @@ A lightweight package manager for Arch Linux and its derivatives that uses **Hom
 **ArchBrew** is **independent** - not a port or fork of Homebrew - but provides a similar workflow tailored for Arch systems.
 
 # Usage
-brew <COMMAND>    
+brew (COMMAND)   
 
 Commands:     
   install  -  Install one or more packages     
