@@ -18,7 +18,7 @@ const CYAN: &str = "\x1b[36m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
-const KNOWN_COMMANDS: [&str; 9] = [
+const KNOWN_COMMANDS: [&str; 10] = [
     "install",
     "update",
     "upgrade",
@@ -27,8 +27,10 @@ const KNOWN_COMMANDS: [&str; 9] = [
     "uninstall",
     "list",
     "doctor",
+    "clean",
     "help",
 ];
+const ARCHBREW_CACHE_ROOT: &str = "/var/tmp/archbrew-cache";
 
 #[derive(Debug, Deserialize)]
 struct AurRpcResponse {
@@ -125,6 +127,8 @@ enum Commands {
     },
     /// Run diagnostics
     Doctor,
+    /// Clean ArchBrew cache
+    Clean,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -167,6 +171,7 @@ fn main() -> ExitCode {
         Commands::Uninstall { packages, source } => uninstall_packages(&packages, source),
         Commands::List { source } => list_installed(source),
         Commands::Doctor => doctor(),
+        Commands::Clean => clean_cache(),
     };
 
     match result {
@@ -234,6 +239,48 @@ fn run_with_fakeroot(program: &str, args: &[String]) -> Result<(), String> {
     } else {
         Err(format!("{program} exited with status {status}"))
     }
+}
+
+fn current_build_user() -> Result<String, String> {
+    env::var("SUDO_USER")
+        .or_else(|_| env::var("USER"))
+        .map_err(|_| "unable to determine build user".to_string())
+}
+
+fn cache_root_for_user(user: &str) -> PathBuf {
+    PathBuf::from(ARCHBREW_CACHE_ROOT).join(user)
+}
+
+fn aur_snapshot_cache_dir(user: &str) -> PathBuf {
+    cache_root_for_user(user).join("snapshots")
+}
+
+fn aur_source_cache_dir(user: &str) -> PathBuf {
+    cache_root_for_user(user).join("sources")
+}
+
+fn aur_sandbox_home_dir(user: &str) -> PathBuf {
+    cache_root_for_user(user).join("sandbox-home")
+}
+
+fn ensure_dir(path: &PathBuf) -> Result<(), String> {
+    fs::create_dir_all(path)
+        .map_err(|e| format!("failed to create directory '{}': {e}", path.display()))
+}
+
+fn clean_cache() -> Result<(), String> {
+    let user = current_build_user()?;
+    let user_cache = cache_root_for_user(&user);
+
+    if !user_cache.exists() {
+        println!("{GREEN}==>{RESET} ArchBrew cache is already clean");
+        return Ok(());
+    }
+
+    fs::remove_dir_all(&user_cache)
+        .map_err(|e| format!("failed to remove cache '{}': {e}", user_cache.display()))?;
+    println!("{GREEN}==>{RESET} Removed ArchBrew cache: {}", user_cache.display());
+    Ok(())
 }
 
 fn install_packages(packages: &[String], local: Option<&str>, source: Source) -> Result<(), String> {
@@ -361,7 +408,7 @@ fn install_aur_packages(targets: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    println!("{GREEN}==>{RESET} Building AUR packages in sandbox workspace");
+    println!("{GREEN}==>{RESET} Building AUR packages");
     let mut built_packages = Vec::new();
     for unit in &mut units {
         println!("{CYAN}==>{RESET} Building {} {}", unit.info.name, unit.info.version);
@@ -482,6 +529,10 @@ fn prepare_aur_build_units(
 }
 
 fn download_aur_snapshot(info: &AurPackageInfo) -> Result<PathBuf, String> {
+    let build_user = current_build_user()?;
+    let snapshot_cache_dir = aur_snapshot_cache_dir(&build_user);
+    ensure_dir(&snapshot_cache_dir)?;
+
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("failed to read system time: {e}"))?
@@ -489,23 +540,30 @@ fn download_aur_snapshot(info: &AurPackageInfo) -> Result<PathBuf, String> {
     let root = env::temp_dir().join(format!("archbrew-aur-{}-{stamp}", info.name));
     fs::create_dir_all(&root).map_err(|e| format!("failed to create temp dir: {e}"))?;
 
-    let archive = root.join(format!("{}.tar.gz", info.package_base));
+    let archive = snapshot_cache_dir.join(format!("{}-{}.tar.gz", info.name, info.package_base));
     let url = format!(
         "https://aur.archlinux.org/cgit/aur.git/snapshot/{}.tar.gz",
         info.package_base
     );
 
-    let output = Command::new("curl")
-        .args(["-fsSL", &url, "-o"])
-        .arg(&archive)
-        .output()
-        .map_err(|e| format!("failed to download AUR snapshot: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "failed to download AUR snapshot for '{}': {}",
-            info.name,
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    if !archive.exists() {
+        let output = Command::new("curl")
+            .args(["-fsSL", &url, "-o"])
+            .arg(&archive)
+            .output()
+            .map_err(|e| format!("failed to download AUR snapshot: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to download AUR snapshot for '{}': {}",
+                info.name,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    } else {
+        println!(
+            "{CYAN}==>{RESET} Using cached AUR snapshot for {}",
+            info.name
+        );
     }
 
     let untar = Command::new("tar")
@@ -626,39 +684,114 @@ fn open_pkgbuild_in_less(unit: &AurBuildUnit) -> Result<(), String> {
 }
 
 fn build_aur_unit(unit: &AurBuildUnit) -> Result<(), String> {
-    let build_user = env::var("SUDO_USER")
-        .or_else(|_| env::var("USER"))
-        .map_err(|_| "unable to determine non-root build user".to_string())?;
+    let build_user = current_build_user()?;
+    let src_cache_dir = aur_source_cache_dir(&build_user).join(&unit.info.name);
+    let sandbox_home = aur_sandbox_home_dir(&build_user);
+    ensure_dir(&src_cache_dir)?;
+    ensure_dir(&sandbox_home)?;
+
+    let bwrap_check = Command::new("bwrap")
+        .arg("--version")
+        .output()
+        .map_err(|_| {
+            "bubblewrap (bwrap) is required for AUR sandbox builds. Install package 'bubblewrap'."
+                .to_string()
+        })?;
+    if !bwrap_check.status.success() {
+        return Err(
+            "bubblewrap (bwrap) is required for AUR sandbox builds. Install package 'bubblewrap'."
+                .to_string(),
+        );
+    }
 
     if is_running_as_root() {
         let owner = format!("{build_user}:{build_user}");
         let status = Command::new("chown")
             .args(["-R", owner.as_str()])
             .arg(&unit.build_dir)
+            .arg(&src_cache_dir)
+            .arg(&sandbox_home)
             .status()
             .map_err(|e| format!("failed to fix build dir ownership: {e}"))?;
         if !status.success() {
             return Err(format!(
-                "failed to set writable ownership for AUR build dir '{}': {}",
+                "failed to set writable ownership for AUR build directories for '{}': {}",
                 unit.build_dir.display(),
                 owner
             ));
         }
     }
 
-    let cmd = format!(
-        "cd '{}' && makepkg --syncdeps --cleanbuild --clean --needed --noconfirm",
-        unit.build_dir.display()
-    );
-    let output = Command::new("sudo")
-        .args(["-u", &build_user, "sh", "-lc", &cmd])
-        .output()
-        .map_err(|e| format!("failed to invoke makepkg for '{}': {e}", unit.info.name))?;
+    let makepkg = vec![
+        "/usr/bin/makepkg".to_string(),
+        "--syncdeps".to_string(),
+        "--cleanbuild".to_string(),
+        "--clean".to_string(),
+        "--needed".to_string(),
+        "--noconfirm".to_string(),
+    ];
+
+    let bwrap_args = vec![
+        "--die-with-parent".to_string(),
+        "--ro-bind".to_string(),
+        "/".to_string(),
+        "/".to_string(),
+        "--bind".to_string(),
+        unit.build_dir.display().to_string(),
+        unit.build_dir.display().to_string(),
+        "--bind".to_string(),
+        src_cache_dir.display().to_string(),
+        src_cache_dir.display().to_string(),
+        "--bind".to_string(),
+        sandbox_home.display().to_string(),
+        sandbox_home.display().to_string(),
+        "--bind".to_string(),
+        "/tmp".to_string(),
+        "/tmp".to_string(),
+        "--bind".to_string(),
+        "/var/tmp".to_string(),
+        "/var/tmp".to_string(),
+        "--proc".to_string(),
+        "/proc".to_string(),
+        "--dev".to_string(),
+        "/dev".to_string(),
+        "--tmpfs".to_string(),
+        "/home".to_string(),
+        "--setenv".to_string(),
+        "HOME".to_string(),
+        sandbox_home.display().to_string(),
+        "--setenv".to_string(),
+        "SRCDEST".to_string(),
+        src_cache_dir.display().to_string(),
+        "--setenv".to_string(),
+        "PACKAGER".to_string(),
+        "ArchBrew".to_string(),
+        "--chdir".to_string(),
+        unit.build_dir.display().to_string(),
+    ];
+
+    let output = if is_running_as_root() {
+        let mut args = vec!["-u".to_string(), build_user.clone(), "bwrap".to_string()];
+        args.extend(bwrap_args);
+        args.extend(makepkg);
+        Command::new("sudo")
+            .args(args)
+            .output()
+            .map_err(|e| format!("failed to invoke bwrap/makepkg for '{}': {e}", unit.info.name))?
+    } else {
+        let mut args = bwrap_args;
+        args.extend(makepkg);
+        Command::new("bwrap")
+            .args(args)
+            .output()
+            .map_err(|e| format!("failed to invoke bwrap/makepkg for '{}': {e}", unit.info.name))?
+    };
 
     if !output.status.success() {
         return Err(format!(
-            "AUR build failed for '{}': {}",
+            "AUR build failed for '{}': {}{}",
             unit.info.name,
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
