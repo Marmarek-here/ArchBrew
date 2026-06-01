@@ -18,10 +18,12 @@ Commands:
   clean    -  Clean ArchBrew cache
 Options:     
 -  -V, --version  Print version    
--  -l, --local    Use a local .pkg.tar.zst with a path specified (to be used only with install)    
+-  -l, --local    Use a local .pkg.tar.zst with a path specified (to be used only with install)
+
 Examples:   
 ```brew install firefox```    
 ```brew info code```
+```brew install -l something.pkg.tar.zst```
 
 # Support
 As the name suggests, **ArchBrew supports only Arch Linux and its derivatives**, including:
